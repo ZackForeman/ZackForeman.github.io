@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moth Storm</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #100d24; }
+  body { display: grid; place-items: center; }
+  canvas {
+    display: block;
+    width: min(100vw, calc(100dvh * 8 / 9));
+    aspect-ratio: 8 / 9;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" aria-label="Moth Storm: defend the garden from moths"></canvas>
+<script>
+'use strict';
+
+const W = 640, H = 720, TAU = Math.PI * 2, STEP = 1 / 120;
+const PLAYER_Y = 610, GARDEN_Y = 676;
+const FONT = 'Georgia, serif';
+const BEST_KEY = 'moth-storm-best';
+const WINGS = ['#e58fb1', '#b9a3e8', '#8fcfc0', '#e9b982'];
+const PETALS = ['#f27b9b', '#f6c453', '#a78bfa', '#fb9268'];
+
+// Each formation maps a moth's phase around the swarm to a position.
+const FORMATIONS = [
+  // Two counter-rotating rings
+  (a, inner, t) => inner
+    ? [Math.cos(a - t) * 110, Math.sin(a - t) * 60]
+    : [Math.cos(a + t * .6) * 225, Math.sin(a + t * .6) * 125],
+  // Figure eight
+  (a, inner, t) => {
+    const p = a + t * .6, size = inner ? .55 : 1;
+    return [Math.sin(p) * 240 * size, Math.sin(p * 2) * 115 * size];
+  },
+  // Spinning blossom
+  (a, inner, t) => {
+    const p = a + t * .35, r = (inner ? 80 : 180) + Math.sin(a * 3 + t * 2) * 35;
+    return [Math.cos(p) * r * 1.2, Math.sin(p) * r * .65];
+  },
+];
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const keys = new Set();
+const stars = Array.from({ length: 70 }, () => [Math.random() * W, Math.random() * 600]);
+
+let state = 'title'; // title | playing | paused | over
+let player, moths, sparks, dust, flowers;
+let score, hearts, wave, waveTime, diveTimer, banner, endedAt = 0;
+let pointerX = null;
+let best = 0;
+try { best = Number(localStorage.getItem(BEST_KEY)) || 0; } catch { /* storage is unavailable */ }
+
+function reset() {
+  player = { x: W / 2, cooldown: 0, safe: 0 };
+  flowers = Array.from({ length: 8 }, (_, i) => ({ x: 50 + i * 77, alive: true, color: PETALS[i % PETALS.length] }));
+  sparks = [];
+  dust = [];
+  score = wave = 0;
+  hearts = 3;
+  nextWave();
+}
+
+function nextWave() {
+  wave++;
+  waveTime = 0;
+  diveTimer = 2.5;
+  banner = 2;
+  sparks = [];
+  const outer = Math.min(12 + wave * 2, 24), inner = Math.min(6 + wave, 12);
+  moths = Array.from({ length: outer + inner }, (_, i) => {
+    const isInner = i >= outer;
+    return {
+      x: W / 2, y: -60, mode: 'swarm', inner: isInner,
+      phase: isInner ? (i - outer) / inner * TAU : i / outer * TAU,
+      color: WINGS[(isInner ? 2 : 0) + i % 2],
+    };
+  });
+}
+
+function start() {
+  reset();
+  keys.clear();
+  state = 'playing';
+}
+
+function endGame() {
+  state = 'over';
+  endedAt = performance.now();
+  best = Math.max(best, score);
+  try { localStorage.setItem(BEST_KEY, best); } catch { /* storage is unavailable */ }
+}
+
+function burst(x, y, color) {
+  for (let i = 0; i < 14; i++) {
+    const a = Math.random() * TAU, speed = 40 + Math.random() * 120;
+    dust.push({ x, y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, life: .6, color });
+  }
+}
+
+function update(dt) {
+  waveTime += dt;
+  banner -= dt;
+  player.cooldown -= dt;
+  player.safe -= dt;
+
+  const direction = (keys.has('ArrowRight') || keys.has('KeyD')) - (keys.has('ArrowLeft') || keys.has('KeyA'));
+  player.x += direction * 390 * dt;
+  if (pointerX !== null) player.x += (pointerX - player.x) * Math.min(1, dt * 18);
+  player.x = Math.max(26, Math.min(W - 26, player.x));
+
+  if ((keys.has('Space') || pointerX !== null) && player.cooldown <= 0) {
+    sparks.push({ x: player.x, y: PLAYER_Y - 26 });
+    player.cooldown = .22;
+  }
+
+  diveTimer -= dt;
+  if (diveTimer <= 0) {
+    const ready = moths.filter(m => m.mode === 'swarm');
+    const moth = ready[Math.floor(Math.random() * ready.length)];
+    const targets = flowers.filter(f => f.alive);
+    if (moth && targets.length) {
+      moth.mode = 'dive';
+      moth.target = targets[Math.floor(Math.random() * targets.length)];
+      moth.age = 0;
+    }
+    diveTimer = Math.max(.45, 2.8 - wave * .22);
+  }
+
+  moveMoths(dt);
+
+  for (const spark of sparks) {
+    spark.y -= 620 * dt;
+    const hit = moths.find(m => !m.dead && Math.hypot(m.x - spark.x, m.y - spark.y) < 19);
+    if (!hit) continue;
+    hit.dead = spark.dead = true;
+    score += (hit.mode === 'dive' ? 25 : 10) * wave;
+    burst(hit.x, hit.y, hit.color);
+  }
+  sparks = sparks.filter(s => !s.dead && s.y > -20);
+  moths = moths.filter(m => !m.dead);
+
+  for (const p of dust) {
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+  }
+  dust = dust.filter(p => p.life > 0);
+
+  if (hearts <= 0 || !flowers.some(f => f.alive)) endGame();
+  else if (!moths.length) {
+    score += flowers.filter(f => f.alive).length * 20;
+    nextWave();
+  }
+}
+
+function moveMoths(dt) {
+  const formation = FORMATIONS[(wave - 1) % FORMATIONS.length];
+  const diveSpeed = Math.min(125 + wave * 18, 310);
+
+  for (const m of moths) {
+    if (m.mode === 'dive') {
+      m.age += dt;
+      // Switch to a flower that is still there if another moth got to this one first.
+      if (!m.target.alive) m.target = flowers.find(f => f.alive) || m.target;
+      const dx = m.target.x - m.x, dy = GARDEN_Y - m.y, distance = Math.hypot(dx, dy) || 1;
+      const flutter = Math.sin(m.age * 5) * Math.min(150, distance);
+      m.x += (dx / distance * diveSpeed + flutter) * dt;
+      m.y += dy / distance * diveSpeed * dt;
+
+      if (distance < 16) {
+        if (m.target.alive) burst(m.target.x, GARDEN_Y, m.target.color);
+        m.target.alive = false;
+        m.mode = 'swarm';
+      }
+    } else {
+      const [x, y] = formation(m.phase, m.inner, waveTime);
+      const dx = W / 2 + x - m.x, dy = 240 + y - m.y, distance = Math.hypot(dx, dy) || 1;
+      const move = Math.min(distance, 330 * dt);
+      m.x += dx / distance * move;
+      m.y += dy / distance * move;
+    }
+
+    if (player.safe <= 0 && Math.hypot(m.x - player.x, m.y - PLAYER_Y) < 30) {
+      m.dead = true;
+      hearts--;
+      player.safe = 1.5;
+      burst(player.x, PLAYER_Y, '#ffd877');
+    }
+  }
+}
+
+function circle(x, y, r, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, TAU);
+  ctx.fill();
+}
+
+function oval(x, y, rx, ry, angle, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.ellipse(x, y, rx, ry, angle, 0, TAU);
+  ctx.fill();
+}
+
+function label(text, x, y, size, color = '#f5ecd9', align = 'center') {
+  ctx.font = `${size}px ${FONT}`;
+  ctx.fillStyle = color;
+  ctx.textAlign = align;
+  ctx.fillText(text, x, y);
+}
+
+function drawMoth(m, now) {
+  const flap = .55 + .45 * Math.abs(Math.sin(now * .012 + m.phase * 3));
+  for (const side of [-1, 1]) {
+    oval(m.x + side * 9 * flap, m.y - 4, 11 * flap, 8, side * -.45, m.color);
+    oval(m.x + side * 6 * flap, m.y + 6, 7 * flap, 5, side * .5, m.color);
+    circle(m.x + side * 10 * flap, m.y - 4, 2.5, '#352653');
+  }
+  oval(m.x, m.y, 3, 10, 0, m.mode === 'dive' ? '#ff5d5d' : '#4b365f');
+}
+
+function drawLantern(x, y) {
+  circle(x, y, 38, 'rgba(255,216,119,.10)');
+  circle(x, y, 26, 'rgba(255,216,119,.16)');
+  ctx.strokeStyle = '#b88a4a';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(x, y - 18, 9, Math.PI, 0);
+  ctx.stroke();
+  ctx.fillStyle = '#b88a4a';
+  ctx.fillRect(x - 15, y - 18, 30, 6);
+  ctx.fillRect(x - 15, y + 15, 30, 6);
+  oval(x, y + 1, 14, 16, 0, '#ffd877');
+  oval(x, y + 4, 5, 9, 0, '#fff8dc');
+}
+
+function drawFlower(flower) {
+  ctx.fillStyle = flower.alive ? '#5e9b68' : '#39443f';
+  ctx.fillRect(flower.x - 2, GARDEN_Y, 4, 30);
+  if (!flower.alive) return;
+  for (let i = 0; i < 5; i++) {
+    const a = i / 5 * TAU;
+    circle(flower.x + Math.cos(a) * 9, GARDEN_Y + Math.sin(a) * 9, 7, flower.color);
+  }
+  circle(flower.x, GARDEN_Y, 6, '#fff0b8');
+}
+
+function draw(now) {
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#100d24');
+  sky.addColorStop(1, '#29405a');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+  for (const [x, y] of stars) circle(x, y, 1.2, 'rgba(255,255,255,.4)');
+  oval(170, 750, 380, 75, 0, '#17302d');
+  oval(510, 755, 340, 72, 0, '#1c3932');
+  flowers.forEach(drawFlower);
+
+  if (state !== 'title') {
+    moths.forEach(m => drawMoth(m, now));
+    for (const s of sparks) oval(s.x, s.y, 3, 9, 0, '#ffe9a3');
+    for (const p of dust) circle(p.x, p.y, p.life * 6, p.color);
+    if (player.safe <= 0 || Math.floor(player.safe * 10) % 2) drawLantern(player.x, PLAYER_Y);
+
+    label(`Score ${score}`, 18, 34, 22, undefined, 'left');
+    label(`Wave ${wave}`, W / 2, 34, 22);
+    label('♥'.repeat(hearts), W - 60, 34, 24, '#f27b9b', 'right');
+    label('II', W - 25, 34, 24);
+    if (banner > 0 && state === 'playing') label(`Wave ${wave}`, W / 2, 470, 38, '#ffd877');
+  }
+
+  if (state === 'playing') return;
+  ctx.fillStyle = 'rgba(16,13,36,.72)';
+  ctx.fillRect(0, 0, W, H);
+
+  if (state === 'title') {
+    drawLantern(W / 2, 175);
+    label('Moth Storm', W / 2, 285, 64, '#ffd877');
+    label('The moths are hungry. Guard the garden.', W / 2, 330, 22);
+    label('Move: ← → or A D     Fire: Space', W / 2, 405, 22);
+    label('Touch or mouse: hold and drag', W / 2, 440, 22);
+    label('Pause: P, Esc, or II', W / 2, 475, 22);
+    label('Press Enter or tap to start', W / 2, 550, 26, '#ffd877');
+    if (best) label(`Best ${best}`, W / 2, 595, 20);
+  } else if (state === 'paused') {
+    label('Paused', W / 2, 330, 56, '#ffd877');
+    label('Press P or tap to resume', W / 2, 385, 24);
+  } else {
+    label(hearts <= 0 ? 'Your light went out' : 'The garden is bare', W / 2, 290, 48, '#ffd877');
+    label(`Score ${score}     Best ${best}`, W / 2, 350, 26);
+    label('Press Enter or tap to play again', W / 2, 425, 24);
+  }
+}
+
+function confirmAction() {
+  if (state === 'title') start();
+  else if (state === 'paused') state = 'playing';
+  else if (state === 'over' && performance.now() - endedAt > 700) start();
+}
+
+function pause() {
+  keys.clear();
+  pointerX = null;
+  if (state === 'playing') state = 'paused';
+}
+
+addEventListener('keydown', e => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (['Space', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+  if (!e.repeat) {
+    if (e.code === 'Enter') confirmAction();
+    if (e.code === 'KeyP' || e.code === 'Escape') {
+      if (state === 'paused') state = 'playing';
+      else pause();
+    }
+  }
+  keys.add(e.code);
+});
+addEventListener('keyup', e => keys.delete(e.code));
+addEventListener('blur', pause);
+
+function toGame(e) {
+  const box = canvas.getBoundingClientRect();
+  return [(e.clientX - box.left) * W / box.width, (e.clientY - box.top) * H / box.height];
+}
+
+canvas.addEventListener('pointerdown', e => {
+  if (state !== 'playing') return confirmAction();
+  const [x, y] = toGame(e);
+  if (x > W - 55 && y < 55) return pause();
+  pointerX = x;
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', e => {
+  if (pointerX !== null) pointerX = toGame(e)[0];
+});
+for (const type of ['pointerup', 'pointercancel']) {
+  canvas.addEventListener(type, () => { pointerX = null; });
+}
+
+function resize() {
+  const scale = canvas.clientWidth * devicePixelRatio / W;
+  canvas.width = Math.round(W * scale);
+  canvas.height = Math.round(H * scale);
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+}
+addEventListener('resize', resize);
+
+// Fixed timestep, so game speed doesn't depend on the screen's refresh rate.
+let last = performance.now(), pending = 0;
+function frame(now) {
+  pending += Math.max(0, Math.min((now - last) / 1000, .1));
+  last = now;
+  while (pending >= STEP) {
+    if (state === 'playing') update(STEP);
+    pending -= STEP;
+  }
+  draw(now);
+  requestAnimationFrame(frame);
+}
+
+resize();
+reset();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
